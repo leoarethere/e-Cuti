@@ -4,26 +4,39 @@ namespace App\Filament\Resources;
 
 use Carbon\Carbon;
 use Filament\Forms;
-use App\Models\Cuti; // Untuk email notifikasi
-use Filament\Tables; // Untuk kalkulasi durasi
+use App\Models\Cuti;
+use Filament\Tables;
+use App\Models\Employee;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
+use App\Exports\FormCutiExport;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use Illuminate\Support\Facades\Auth;
+use Maatwebsite\Excel\Facades\Excel;
 use Filament\Forms\Components\Select;
-use Filament\Forms\Components\Textarea;
-use Filament\Tables\Columns\TextColumn;
 
 // === Komponen Form ===
-use App\Notifications\CutiStatusUpdated;
-use Filament\Notifications\Notification;
-use Filament\Tables\Columns\BadgeColumn;
+use Maatwebsite\Excel\Excel as ExcelTypes;
+use Filament\Forms\Components\Textarea;
+use Filament\Tables\Actions\EditAction;
 
 // === Komponen Tabel ===
+use Filament\Tables\Columns\TextColumn;
+use App\Notifications\CutiStatusUpdated;
+
+// === Komponen Aksi (v3) ===
+use Filament\Notifications\Notification;
+use Filament\Tables\Columns\BadgeColumn;
 use Filament\Forms\Components\DatePicker;
+use Filament\Tables\Actions\DeleteAction;
 use Illuminate\Database\Eloquent\Builder;
+
+// === Impor untuk EKSPOR (BARU) ===
+use Filament\Tables\Actions\BulkActionGroup;
+use Filament\Tables\Actions\DeleteBulkAction;
 use App\Filament\Resources\CutiResource\Pages;
+
 
 class CutiResource extends Resource
 {
@@ -37,7 +50,7 @@ class CutiResource extends Resource
 
     
     /**
-     * Form Pengajuan Cuti (dari Tahap 3)
+     * Form Pengajuan Cuti (Logika Tahap 3 yang Benar)
      */
     public static function form(Form $form): Form
     {
@@ -47,6 +60,7 @@ class CutiResource extends Resource
                     ->label('Nama Pegawai')
                     ->relationship('employee', 'nama')
                     ->searchable()
+                    // Logika 'required' dan 'visible' ini yang benar (bukan 'default' atau 'disabled')
                     ->required(fn () => Auth::user()->role === 'admin')
                     ->visible(fn () => Auth::user()->role === 'admin'),
 
@@ -83,7 +97,7 @@ class CutiResource extends Resource
     }
 
     /**
-     * Tabel List Cuti (Logika BARU)
+     * Tabel List Cuti (dengan Aksi yang Sudah Digabung)
      */
     public static function table(Table $table): Table
     {
@@ -117,10 +131,35 @@ class CutiResource extends Resource
             ->filters([
                 //
             ])
+            // === SEMUA AKSI DIGABUNG DI SINI ===
             ->actions([
-                // ===================================
+                
+                // === ACTION EXPORT FORM INDIVIDUAL PDF (BARU) ===
+                Action::make('exportFormPdf')
+                    ->label('Cetak Form PDF')
+                    ->icon('heroicon-o-printer')
+                    ->color('danger')
+                    ->action(function (Cuti $record) {
+                        return Excel::download(
+                            new FormCutiExport($record), 
+                            'form_cuti_' . $record->employee->nama . '_' . date('Y-m-d') . '.pdf',
+                            ExcelTypes::DOMPDF
+                        );
+                    }),
+                
+                // === ACTION EXPORT FORM INDIVIDUAL EXCEL (BARU) ===
+                Action::make('exportFormExcel')
+                    ->label('Cetak Form Excel')
+                    ->icon('heroicon-o-document-arrow-down')
+                    ->color('success')
+                    ->action(function (Cuti $record) {
+                        return Excel::download(
+                            new FormCutiExport($record), 
+                            'form_cuti_' . $record->employee->nama . '_' . date('Y-m-d') . '.xlsx'
+                        );
+                    }),
+
                 // === AKSI TAHAP 1: KETUA TIM SDM ===
-                // ===================================
                 Action::make('Proses SDM')
                     ->icon('heroicon-o-pencil')
                     ->color('info')
@@ -145,13 +184,9 @@ class CutiResource extends Resource
                             $record->status_global = 'Ditolak (oleh SDM)';
                         }
                         $record->save();
-                        
-                        // !! NOTIFIKASI DIHAPUS DARI SINI !!
                     }),
 
-                // =======================================
                 // === AKSI TAHAP 2: KASUBBAG TATA USAHA ===
-                // =======================================
                 Action::make('Proses Tata Usaha')
                     ->icon('heroicon-o-pencil')
                     ->color('info')
@@ -178,9 +213,7 @@ class CutiResource extends Resource
                         $record->save();
                     }),
                 
-                // =====================================
                 // === AKSI TAHAP 3: KEPALA STASIUN  ===
-                // =====================================
                 Action::make('Proses Kepala')
                     ->icon('heroicon-o-check')
                     ->color('success')
@@ -198,7 +231,6 @@ class CutiResource extends Resource
                     ->action(function (Cuti $record, array $data): void {
                         $record->status_kepala = $data['status_kepala'];
                         $record->tanggapan_kepala = $data['tanggapan_kepala'];
-
                         $employee = $record->employee;
 
                         if ($data['status_kepala'] === 'approved') {
@@ -217,24 +249,21 @@ class CutiResource extends Resource
                                 $employee->sisa_cuti_tahunan -= $durasiCuti;
                                 $employee->save();
                             }
-
                             $record->status_global = 'Disetujui';
                         } else {
                             $record->status_global = 'Ditolak (oleh Kepala)';
                         }
-                        
                         $record->save();
-                        
-                        // Notifikasi HANYA dikirim setelah keputusan final.
                         $employee->notify(new CutiStatusUpdated($record));
                     }),
                 
-                Tables\Actions\EditAction::make(),
-                Tables\Actions\DeleteAction::make(),
+                // Tombol default
+                EditAction::make(),
+                DeleteAction::make(),
             ])
             ->bulkActions([
-                Tables\Actions\BulkActionGroup::make([
-                    Tables\Actions\DeleteBulkAction::make(),
+                BulkActionGroup::make([
+                    DeleteBulkAction::make(),
                 ]),
             ]);
     }
@@ -249,6 +278,10 @@ class CutiResource extends Resource
 
         switch ($user->role) {
             case 'pegawai':
+                // Cek dulu apakah $user->employee ada, jika tidak, kembalikan 'kosong'
+                if (!$user->employee) {
+                    return $query->where('id', 0); // Jangan tampilkan apa-apa
+                }
                 return $query->where('employee_id', $user->employee->id);
             
             case 'sdm':
